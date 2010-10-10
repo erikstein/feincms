@@ -34,8 +34,11 @@ class NavigationNode(SimpleAssignmentNodeWithVarAndArgs):
         depth = int(args.get('depth', 1))
 
         if isinstance(instance, HttpRequest):
-            instance = Page.objects.from_request(instance)
-
+            try:
+                instance = Page.objects.from_request(instance)
+            except Page.DoesNotExist:
+                instance = None
+        
         entries = self._what(instance, level, depth)
 
         if args.get('extended', False):
@@ -52,7 +55,7 @@ class NavigationNode(SimpleAssignmentNodeWithVarAndArgs):
         return entries
 
     def _what(self, instance, level, depth):
-        if level <= 1:
+        if level <= 1 or not instance:
             if depth == 1:
                 return Page.objects.toplevel_navigation()
             else:
