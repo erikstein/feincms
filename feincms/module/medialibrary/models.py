@@ -7,6 +7,7 @@ from datetime import datetime
 from django.contrib import admin
 from django.contrib.auth.decorators import permission_required
 from django.conf import settings as django_settings
+from django.core.urlresolvers import get_callable
 from django.db import models
 from django.template.defaultfilters import filesizeformat
 from django.utils.safestring import mark_safe
@@ -77,9 +78,12 @@ class CategoryAdmin(admin.ModelAdmin):
 # ------------------------------------------------------------------------
 class MediaFileBase(Base, TranslatedObjectMixin):
 
-    # XXX maybe have a look at settings.DEFAULT_FILE_STORAGE here?
     from django.core.files.storage import FileSystemStorage
-    fs = FileSystemStorage(location=settings.FEINCMS_MEDIALIBRARY_ROOT,
+    default_storage_class = getattr(django_settings, 'DEFAULT_FILE_STORAGE', 
+                                    'django.core.files.storage.FileSystemStorage')
+    default_storage = get_callable(default_storage_class)
+        
+    fs = default_storage(location=settings.FEINCMS_MEDIALIBRARY_ROOT,
                            base_url=settings.FEINCMS_MEDIALIBRARY_URL)
 
     file = models.FileField(_('file'), max_length=255, upload_to=settings.FEINCMS_MEDIALIBRARY_UPLOAD_TO, storage=fs)
@@ -273,6 +277,7 @@ MediaFileBase.register_filetypes(
         ('swf', _('Flash'), lambda f: f.lower().endswith('.swf')),
         ('txt', _('Text'), lambda f: f.lower().endswith('.txt')),
         ('rtf', _('Rich Text'), lambda f: f.lower().endswith('.rtf')),
+        ('zip', _('Zip archive'), lambda f: f.lower().endswith('.zip')),
         ('doc', _('Microsoft Word'), lambda f: re.compile(r'\.docx?$', re.IGNORECASE).search(f)),
         ('xls', _('Microsoft Excel'), lambda f: re.compile(r'\.xlsx?$', re.IGNORECASE).search(f)),
         ('ppt', _('Microsoft PowerPoint'), lambda f: re.compile(r'\.pptx?$', re.IGNORECASE).search(f)),
