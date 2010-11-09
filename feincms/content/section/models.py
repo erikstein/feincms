@@ -83,7 +83,7 @@ class SectionContent(models.Model):
             'content/section/%s.html' % self.type,
             'content/section/%s.html' % mediafile_type,
             'content/section/default.html',
-            ], {'content': self})
+            ], {'content': self, 'outer_context': kwargs['context']})
 
     def save(self, *args, **kwargs):
         if getattr(self, 'cleanse', False):
