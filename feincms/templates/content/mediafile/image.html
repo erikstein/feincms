@@ -1,5 +1,7 @@
 <div class="image">
+	{% if content.url %}<a href="{{ content.url }}">{% endif %}
     <img src="{{ content.mediafile.file.url }}" alt="{{ content.mediafile.translation.caption }}" />
     <span class="caption">{{ content.mediafile.translation.caption }}</span>
+	{% if content.url %}</a>{% endif %}
     {% if content.mediafile.copyright %}<span class="copyright">{{ content.mediafile.copyright }}</span>{% endif %}
 </div>

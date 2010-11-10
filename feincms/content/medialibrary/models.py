@@ -76,6 +76,8 @@ class MediaFileContent(models.Model):
             max_length=10, choices=POSITION_CHOICES,
             default=POSITION_CHOICES[0][0]))
 
+        cls.add_to_class('url', models.CharField(_('url'), blank=True, max_length=500))
+
         class MediaFileContentAdminForm(ItemEditorForm):
             mediafile = forms.ModelChoiceField(queryset=MEDIAFILE_CLASS.objects.all(),
                 widget=MediaFileWidget, label=_('media file'))
