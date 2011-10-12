@@ -3,7 +3,7 @@ This extension adds a language field to every page. When calling setup_request,
 the page's language is activated.
 Pages in secondary languages can be said to be a translation of a page in the
 primary language (the first language in settings.LANGUAGES), thereby enabling
-deeplinks between translated pages...
+deeplinks between translated pages.
 
 This extension requires an activated LocaleMiddleware or something equivalent.
 """
@@ -45,7 +45,7 @@ def translation_set_language(request, select_language):
         # other messages and other applications. It is *highly* recommended to
         # create a new django.po for the language instead of
         # using this behaviour.
-        select_language = settings.LANGUAGES[0][0]
+        select_language = django_settings.LANGUAGES[0][0]
         fallback = True
 
     translation.activate(select_language)

@@ -16,7 +16,7 @@ def get_templates():
 
     for loader in settings.TEMPLATE_LOADERS:
         loader_instance = find_template_loader(loader)
-        if not loader_instance:
+        if not loader_instance or not hasattr(loader_instance, 'get_template_sources'):
             continue
 
         for basepath in loader_instance.get_template_sources('.'):
@@ -44,6 +44,14 @@ class TemplateContentAdminForm(ItemEditorForm):
 
 
 class TemplateContent(models.Model):
+    """
+    This content type scans all template folders for files in the
+    ``content/template/`` folder and lets the website administrator select
+    any template from a set of provided choices.
+
+    The templates aren't restricted in any way.
+    """
+
     feincms_item_editor_form = TemplateContentAdminForm
 
     filename = models.CharField(_('template'), max_length=100,

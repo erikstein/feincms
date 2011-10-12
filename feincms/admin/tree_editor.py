@@ -28,8 +28,8 @@ def django_boolean_icon(field_val, alt_text=None, title=None):
         title = 'title="%s" ' % title
     else:
         title = ''
-    return mark_safe(u'<img src="%simg/admin/icon-%s.gif" alt="%s" %s/>' %
-            (django_settings.ADMIN_MEDIA_PREFIX, BOOLEAN_MAPPING[field_val], alt_text, title))
+    return mark_safe(u'<img src="%sicon-%s.gif" alt="%s" %s/>' %
+            (settings._HACK_ADMIN_MEDIA_IMAGES, BOOLEAN_MAPPING[field_val], alt_text, title))
 
 
 def _build_tree_structure(cls):
@@ -46,10 +46,19 @@ def _build_tree_structure(cls):
     """
     all_nodes = { }
 
-    for p_id, parent_id in cls.objects.order_by(cls._meta.tree_id_attr, cls._meta.left_attr).values_list("pk", "%s_id" % cls._meta.parent_attr):
+    if hasattr(cls, '_mptt_meta'): # New-style MPTT
+        mptt_opts = cls._mptt_meta
+    else:
+        mptt_opts = cls._meta
+
+    for p_id, parent_id in cls.objects.order_by(mptt_opts.tree_id_attr, mptt_opts.left_attr).values_list("pk", "%s_id" % mptt_opts.parent_attr):
         all_nodes[p_id] = []
 
         if parent_id:
+            if not all_nodes.has_key(parent_id):
+                # This happens very rarely, but protect against parents that
+                # we have yet to iteratove over.
+                all_nodes[parent_id] = []
             all_nodes[parent_id].append(p_id)
 
     return all_nodes
@@ -87,7 +96,6 @@ def ajax_editable_boolean_cell(item, attr, text='', override=None):
 
     a.insert(0, '<div id="wrap_%s_%d">' % ( attr, item.id ))
     a.append('</div>')
-    #print a
     return unicode(''.join(a))
 
 # ------------------------------------------------------------------------
@@ -96,7 +104,8 @@ def ajax_editable_boolean(attr, short_description):
     Convenience function: Assign the return value of this method to a variable
     of your ModelAdmin class and put the variable name into list_display.
 
-    Example:
+    Example::
+
         class MyTreeEditor(TreeEditor):
             list_display = ('__unicode__', 'active_toggle')
 
@@ -109,18 +118,23 @@ def ajax_editable_boolean(attr, short_description):
     _fn.editable_boolean_field = attr
     return _fn
 
-# !!!: Hack alert! Patching ChangeList, check whether this still applies post Django 1.1
-# If the ChangeList is used by a TreeEditor, we always need to order by 'tree_id' and 'lft'.
+
+# ------------------------------------------------------------------------
 class ChangeList(main.ChangeList):
-    def get_query_set(self):
-        qs = super(ChangeList, self).get_query_set()
-        if isinstance(self.model_admin, TreeEditor):
-            return qs.order_by('tree_id', 'lft')
-        return qs
+    """
+    Custom ``ChangeList`` class which ensures that the tree entries are always
+    ordered in depth-first order (order by ``tree_id``, ``lft``).
+    """
+
+    def __init__(self, request, *args, **kwargs):
+        self.user = request.user
+        super(ChangeList, self).__init__(request, *args, **kwargs)
+
+    def get_query_set(self, *args, **kwargs):
+        return super(ChangeList, self).get_query_set(*args, **kwargs).order_by('tree_id', 'lft')
 
     def get_results(self, request):
-        if isinstance(self.model_admin, TreeEditor) and \
-                settings.FEINCMS_TREE_EDITOR_INCLUDE_ANCESTORS:
+        if settings.FEINCMS_TREE_EDITOR_INCLUDE_ANCESTORS:
             clauses = [Q(
                 tree_id=tree_id,
                 lft__lte=lft,
@@ -130,14 +144,28 @@ class ChangeList(main.ChangeList):
             if clauses:
                 self.query_set = self.model._default_manager.filter(reduce(lambda p, q: p|q, clauses))
 
-        return super(ChangeList, self).get_results(request)
-main.ChangeList = ChangeList
+        super(ChangeList, self).get_results(request)
+
+        opts = self.model_admin.opts
+        label = opts.app_label + '.' + opts.get_change_permission()
+        for item in self.result_list:
+            if settings.FEINCMS_TREE_EDITOR_OBJECT_PERMISSIONS:
+                item.feincms_editable = self.model_admin.has_change_permission(request, item)
+            else:
+                item.feincms_editable = True
 
 # ------------------------------------------------------------------------
 # MARK: -
 # ------------------------------------------------------------------------
 
 class TreeEditor(admin.ModelAdmin):
+    """
+    The ``TreeEditor`` modifies the standard Django administration change list
+    to a drag-drop enabled interface for django-mptt_-managed Django models.
+
+    .. _django-mptt: http://github.com/mptt/django-mptt/
+    """
+
     if settings.FEINCMS_TREE_EDITOR_INCLUDE_ANCESTORS:
         # Make sure that no pagination is displayed. Slicing is disabled anyway,
         # therefore this value does not have an influence on the queryset
@@ -162,20 +190,24 @@ class TreeEditor(admin.ModelAdmin):
             'admin/feincms/tree_editor.html',
             ]
 
+    def editable(self, item):
+        return getattr(item, 'feincms_editable', True)
+
     def indented_short_title(self, item):
         """
-        Generate a short title for a page, indent it depending on
-        the page's depth in the hierarchy.
+        Generate a short title for an object, indent it depending on
+        the object's depth in the hierarchy.
         """
+        r = ''
         if hasattr(item, 'get_absolute_url'):
-            r = '''<input type="hidden" class="medialibrary_file_path" value="%s" /><span id="page_marker-%d"
-            class="page_marker" style="width: %dpx;">&nbsp;</span>&nbsp;''' % (
-                item.get_absolute_url(), item.id, 14+item.level*18)
-        else:
-            r = '''<span id="page_marker-%d"
-            class="page_marker" style="width: %dpx;">&nbsp;</span>&nbsp;''' % (
-                item.id, 14+item.level*18)
+            r = '<input type="hidden" class="medialibrary_file_path" value="%s" />' % item.get_absolute_url()
 
+        editable_class = ''
+        if not getattr(item, 'feincms_editable', True):
+            editable_class = ' tree-item-not-editable'
+
+        r += '<span id="page_marker-%d" class="page_marker%s" style="width: %dpx;">&nbsp;</span>&nbsp;' % (
+                item.id, editable_class, 14+item.level*18)
 #        r += '<span tabindex="0">'
         if hasattr(item, 'short_title'):
             r += item.short_title()
@@ -200,14 +232,15 @@ class TreeEditor(admin.ModelAdmin):
         for field in self.list_display:
             # The ajax_editable_boolean return value has to be assigned
             # to the ModelAdmin class
-            item = getattr(self.__class__, field, None)
-            if not item:
+            try:
+                item = getattr(self.__class__, field)
+            except (AttributeError, TypeError), e:
                 continue
 
             attr = getattr(item, 'editable_boolean_field', None)
             if attr:
-                def _fn(self, page):
-                    return [ ajax_editable_boolean_cell(page, _fn.attr) ]
+                def _fn(self, instance):
+                    return [ ajax_editable_boolean_cell(instance, _fn.attr) ]
                 _fn.attr = attr
                 result_func = getattr(item, 'editable_boolean_result', _fn)
                 self._ajax_editable_booleans[attr] = result_func
@@ -233,8 +266,8 @@ class TreeEditor(admin.ModelAdmin):
             return HttpResponseBadRequest("Malformed request")
 
         if not request.user.is_staff:
-            logging.warning("Denied AJAX request by non-staff %s to toggle boolean %s for page #%s", request.user, attr, item_id)
-            return HttpResponseForbidden("You do not have permission to access this page")
+            logging.warning("Denied AJAX request by non-staff %s to toggle boolean %s for object #%s", request.user, attr, item_id)
+            return HttpResponseForbidden("You do not have permission to access this object")
 
         self._collect_editable_booleans()
 
@@ -249,13 +282,14 @@ class TreeEditor(admin.ModelAdmin):
         can_change = False
 
         if hasattr(obj, "user_can") and obj.user_can(request.user, change_page=True):
+            # Was added in c7f04dfb5d, but I've no idea what user_can is about.
             can_change = True
         else:
-            can_change = request.user.has_perm("page.change_page")
+            can_change = self.has_change_permission(request, obj=obj)
 
         if not can_change:
-            logging.warning("Denied AJAX request by %s to toggle boolean %s for page %s", request.user, attr, item_id)
-            return HttpResponseForbidden("You do not have permission to access this page")
+            logging.warning("Denied AJAX request by %s to toggle boolean %s for object %s", request.user, attr, item_id)
+            return HttpResponseForbidden("You do not have permission to access this object")
 
         logging.info("Processing request by %s to toggle %s on %s", request.user, attr, obj)
 
@@ -282,7 +316,11 @@ class TreeEditor(admin.ModelAdmin):
             if a != b:
                 d.append(b)
 
+        # TODO: Shorter: [ y for x,y in zip(a,b) if x!=y ]
         return HttpResponse(simplejson.dumps(d), mimetype="application/json")
+
+    def get_changelist(self, request, **kwargs):
+        return ChangeList
 
     def changelist_view(self, request, extra_context=None, *args, **kwargs):
         """
@@ -313,6 +351,32 @@ class TreeEditor(admin.ModelAdmin):
 
         return super(TreeEditor, self).changelist_view(request, extra_context, *args, **kwargs)
 
+    def has_change_permission(self, request, obj=None):
+        """
+        Implement a lookup for object level permissions. Basically the same as
+        ModelAdmin.has_change_permission, but also passes the obj parameter in.
+        """
+        if settings.FEINCMS_TREE_EDITOR_OBJECT_PERMISSIONS:
+            opts = self.opts
+            r = request.user.has_perm(opts.app_label + '.' + opts.get_change_permission(), obj)
+        else:
+            r = True
+
+        return r and super(TreeEditor, self).has_change_permission(request, obj)
+
+    def has_delete_permission(self, request, obj=None):
+        """
+        Implement a lookup for object level permissions. Basically the same as
+        ModelAdmin.has_delete_permission, but also passes the obj parameter in.
+        """
+        if settings.FEINCMS_TREE_EDITOR_OBJECT_PERMISSIONS:
+            opts = self.opts
+            r = request.user.has_perm(opts.app_label + '.' + opts.get_delete_permission(), obj)
+        else:
+            r = True
+
+        return r and super(TreeEditor, self).has_delete_permission(request, obj)
+
     def _move_node(self, request):
         cut_item = self.model._tree_manager.get(pk=request.POST.get('cut_item'))
         pasted_on = self.model._tree_manager.get(pk=request.POST.get('pasted_on'))
@@ -336,10 +400,10 @@ class TreeEditor(admin.ModelAdmin):
         self.message_user(request, ugettext('Did not understand moving instruction.'))
         return HttpResponse('FAIL')
 
-    def _actions_column(self, page):
-        return []
+    def _actions_column(self, instance):
+        return ['<div class="drag_handle"></div>',]
 
-    def actions_column(self, page):
-        return u' '.join(self._actions_column(page))
+    def actions_column(self, instance):
+        return u' '.join(self._actions_column(instance))
     actions_column.allow_tags = True
     actions_column.short_description = _('actions')

@@ -3,31 +3,35 @@
 # ------------------------------------------------------------------------
 
 from datetime import datetime
+import logging
+import os
+import re
+# Try to import PIL in either of the two ways it can end up installed.
+try:
+    from PIL import Image
+except ImportError:
+    import Image
 
-from django.contrib import admin
+from django import forms
+from django.contrib import admin, messages
 from django.contrib.auth.decorators import permission_required
+from django.contrib.contenttypes.models import ContentType
 from django.conf import settings as django_settings
-from django.core.urlresolvers import get_callable
 from django.db import models
-from django.template.defaultfilters import filesizeformat
+from django.http import HttpResponseRedirect
+from django.shortcuts import render_to_response
+from django.template.context import RequestContext
+from django.template.defaultfilters import filesizeformat, slugify
 from django.utils.safestring import mark_safe
 from django.utils import translation
-from django.utils.translation import ugettext_lazy as _
-from django.template.defaultfilters import slugify
-from django.http import HttpResponseRedirect
-# 1.2 from django.views.decorators.csrf import csrf_protect
+from django.utils.translation import ungettext, ugettext_lazy as _
+from django.views.decorators.csrf import csrf_protect
 
 from feincms import settings
-from feincms.models import Base
-
+from feincms.models import ExtensionsMixin
 from feincms.templatetags import feincms_thumbnail
 from feincms.translations import TranslatedObjectMixin, Translation, \
-    TranslatedObjectManager
-
-import re
-import os
-import logging
-from PIL import Image
+    TranslatedObjectManager, admin_translationinline
 
 # ------------------------------------------------------------------------
 class CategoryManager(models.Manager):
@@ -40,7 +44,10 @@ class CategoryManager(models.Manager):
 
 # ------------------------------------------------------------------------
 class Category(models.Model):
-    objects = CategoryManager()
+    """
+    These categories are meant primarily for organizing media files in the
+    library.
+    """
 
     title = models.CharField(_('title'), max_length=200)
     parent = models.ForeignKey('self', blank=True, null=True,
@@ -53,6 +60,8 @@ class Category(models.Model):
         ordering = ['parent__title', 'title']
         verbose_name = _('category')
         verbose_name_plural = _('categories')
+
+    objects = CategoryManager()
 
     def __unicode__(self):
         if self.parent_id:
@@ -76,17 +85,13 @@ class CategoryAdmin(admin.ModelAdmin):
 
 
 # ------------------------------------------------------------------------
-class MediaFileBase(Base, TranslatedObjectMixin):
+class MediaFileBase(models.Model, ExtensionsMixin, TranslatedObjectMixin):
+    """
+    Abstract media file class. Includes the :class:`feincms.models.ExtensionsMixin`
+    because of the (handy) extension mechanism.
+    """
 
-    from django.core.files.storage import FileSystemStorage
-    default_storage_class = getattr(django_settings, 'DEFAULT_FILE_STORAGE', 
-                                    'django.core.files.storage.FileSystemStorage')
-    default_storage = get_callable(default_storage_class)
-        
-    fs = default_storage(location=settings.FEINCMS_MEDIALIBRARY_ROOT,
-                           base_url=settings.FEINCMS_MEDIALIBRARY_URL)
-
-    file = models.FileField(_('file'), max_length=255, upload_to=settings.FEINCMS_MEDIALIBRARY_UPLOAD_TO, storage=fs)
+    file = models.FileField(_('file'), max_length=255, upload_to=settings.FEINCMS_MEDIALIBRARY_UPLOAD_TO)
     type = models.CharField(_('file type'), max_length=12, editable=False, choices=())
     created = models.DateTimeField(_('created'), editable=False, default=datetime.now)
     copyright = models.CharField(_('copyright'), max_length=200, blank=True)
@@ -106,17 +111,13 @@ class MediaFileBase(Base, TranslatedObjectMixin):
     filetypes = [ ]
     filetypes_dict = { }
 
-    def get_categories_as_string(self):
-        categories_tmp = self.categories.values_list('title', flat=True)
-        return ', '.join(categories_tmp)
-    get_categories_as_string.short_description = _('categories')
-
     def formatted_file_size(self):
         return filesizeformat(self.file_size)
     formatted_file_size.short_description = _("file size")
+    formatted_file_size.admin_order_field = 'file_size'
 
     def formatted_created(self):
-        return self.created.strftime("%Y-%m-%d %H:%M")
+        return self.created.strftime("%Y-%m-%d")
     formatted_created.short_description = _("created")
     formatted_created.admin_order_field = 'created'
 
@@ -141,8 +142,8 @@ class MediaFileBase(Base, TranslatedObjectMixin):
 
     def __init__(self, *args, **kwargs):
         super(MediaFileBase, self).__init__(*args, **kwargs)
-        if self.file and self.file.path:
-            self._original_file_path = self.file.path
+        if self.file:
+            self._original_file_name = self.file.name
 
     def __unicode__(self):
         trans = None
@@ -158,7 +159,7 @@ class MediaFileBase(Base, TranslatedObjectMixin):
             except AttributeError, e:
                 pass
 
-        if trans:
+        if trans and trans.strip():
             return trans
         else:
             return os.path.basename(self.file.name)
@@ -169,12 +170,17 @@ class MediaFileBase(Base, TranslatedObjectMixin):
     def file_type(self):
         t = self.filetypes_dict[self.type]
         if self.type == 'image':
+            # get_image_dimensions is expensive / slow if the storage is not local filesystem (indicated by availability the path property)
+            try:
+                self.file.path
+            except NotImplementedError:
+                return t
             try:
                 from django.core.files.images import get_image_dimensions
                 d = get_image_dimensions(self.file.file)
-                if d: t += "<br/>%d&times;%d" % ( d[0], d[1] )
+                if d: t += " %d&times;%d" % ( d[0], d[1] )
             except IOError, e:
-                t += "<br/>(%s)" % e.strerror
+                t += " (%s)" % e.strerror
         return t
     file_type.admin_order_field = 'type'
     file_type.short_description = _('file type')
@@ -190,10 +196,14 @@ class MediaFileBase(Base, TranslatedObjectMixin):
         """
         from os.path import basename
         from feincms.utils import shorten_string
-        return u'<input type="hidden" class="medialibrary_file_path" name="_media_path_%d" value="%s" /> %s' % (
+        return u'<input type="hidden" class="medialibrary_file_path" name="_media_path_%d" value="%s" /> %s <br />%s, %s' % (
                 self.id,
                 self.file.name,
-                shorten_string(basename(self.file.name), max_length=28), )
+                shorten_string(basename(self.file.name), max_length=40),
+                self.file_type(),
+                self.formatted_file_size(),
+                )
+    file_info.admin_order_field = 'file'
     file_info.short_description = _('file info')
     file_info.allow_tags = True
 
@@ -241,6 +251,10 @@ class MediaFileBase(Base, TranslatedObjectMixin):
                         exif = image._getexif()
                     except (AttributeError, IOError):
                         exif = False
+                    # PIL < 1.1.7 chokes on JPEGs with minimal EXIF data and
+                    # throws a KeyError deep in its guts.
+                    except KeyError:
+                        exif = False
 
                     if exif:
                         orientation = exif.get(274)
@@ -257,12 +271,9 @@ class MediaFileBase(Base, TranslatedObjectMixin):
             except (OSError, IOError), e:
                 self.type = self.determine_file_type('***') # It's binary something
 
-        if getattr(self, '_original_file_path', None):
-            if self.file.path != self._original_file_path:
-                try:
-                    os.unlink(self._original_file_path)
-                except:
-                    pass
+        if getattr(self, '_original_file_name', None):
+            if self.file.name != self._original_file_name:
+                self.file.storage.delete(self._original_file_name)
 
         super(MediaFileBase, self).save(*args, **kwargs)
         self.purge_translation_cache()
@@ -289,11 +300,14 @@ class MediaFile(MediaFileBase):
     @classmethod
     def register_extension(cls, register_fn):
         register_fn(cls, MediaFileAdmin)
-        pass
 
 # ------------------------------------------------------------------------
 # ------------------------------------------------------------------------
 class MediaFileTranslation(Translation(MediaFile)):
+    """
+    Translated media file caption and description.
+    """
+
     caption = models.CharField(_('caption'), max_length=200)
     description = models.TextField(_('description'), blank=True)
 
@@ -305,16 +319,12 @@ class MediaFileTranslation(Translation(MediaFile)):
         return self.caption
 
 #-------------------------------------------------------------------------
-class MediaFileTranslationInline(admin.StackedInline):
-    model   = MediaFileTranslation
-    max_num = len(django_settings.LANGUAGES)
-
-
 def admin_thumbnail(obj):
+
     if obj.type == 'image':
         image = None
         try:
-            image = feincms_thumbnail.thumbnail(obj.file.name, '100x60')
+            image = feincms_thumbnail.thumbnail(obj.file.name, '100x100')
         except:
             pass
 
@@ -330,14 +340,54 @@ admin_thumbnail.short_description = _('Preview')
 admin_thumbnail.allow_tags = True
 
 #-------------------------------------------------------------------------
+def assign_category(modeladmin, request, queryset):
+    class AddCategoryForm(forms.Form):
+        _selected_action = forms.CharField(widget=forms.MultipleHiddenInput)
+        category = forms.ModelChoiceField(Category.objects.all())
+
+    form = None
+    if 'apply' in request.POST:
+        form = AddCategoryForm(request.POST)
+        if form.is_valid():
+            category = form.cleaned_data['category']
+
+            count = 0
+            for mediafile in queryset:
+                category.mediafile_set.add(mediafile)
+                count += 1
+
+            message = ungettext('Successfully added %(count)d media file to %(category)s.',
+                                'Successfully added %(count)d media files to %(category)s.',
+                                count) % {'count':count, 'category':category}
+            modeladmin.message_user(request, message)
+            return HttpResponseRedirect(request.get_full_path())
+    if 'cancel' in request.POST:
+        return HttpResponseRedirect(request.get_full_path())
+
+    if not form:
+        form = AddCategoryForm(initial={
+            '_selected_action': request.POST.getlist(admin.ACTION_CHECKBOX_NAME),
+            })
+
+    return render_to_response('admin/medialibrary/add_to_category.html', {
+        'mediafiles': queryset,
+        'category_form': form,
+        }, context_instance=RequestContext(request))
+
+assign_category.short_description = _('Add selected media files to category')
+
+#-------------------------------------------------------------------------
+
 class MediaFileAdmin(admin.ModelAdmin):
     date_hierarchy    = 'created'
-    inlines           = [MediaFileTranslationInline]
-    list_display      = ['__unicode__', admin_thumbnail, 'file_type', 'copyright', 'file_info', 'formatted_file_size', 'formatted_created']
+    inlines           = [admin_translationinline(MediaFileTranslation)]
+    list_display      = [admin_thumbnail, '__unicode__', 'file_info', 'formatted_created']
+    list_display_links = ['__unicode__']
     list_filter       = ['type', 'categories']
     list_per_page     = 25
     search_fields     = ['copyright', 'file', 'translations__caption']
     filter_horizontal = ("categories",)
+    actions           = [assign_category]
 
     def get_urls(self):
         from django.conf.urls.defaults import url, patterns
@@ -356,7 +406,7 @@ class MediaFileAdmin(admin.ModelAdmin):
         return super(MediaFileAdmin, self).changelist_view(request, extra_context=extra_context)
 
     @staticmethod
-    # 1.2 @csrf_protect
+    @csrf_protect
     @permission_required('medialibrary.add_mediafile')
     def bulk_upload(request):
         from django.core.urlresolvers import reverse
@@ -372,11 +422,6 @@ class MediaFileAdmin(admin.ModelAdmin):
 
             try:
                 z = zipfile.ZipFile(data)
-
-                storage = MediaFile.fs
-                if not storage:
-                    request.user.message_set.create(message="Could not access storage")
-                    return
 
                 count = 0
                 for zi in z.infolist():
@@ -396,17 +441,15 @@ class MediaFileAdmin(admin.ModelAdmin):
                                 mf.categories.add(category)
                             count += 1
 
-                request.user.message_set.create(message="%d files imported" % count)
+                messages.info(request, _("%d files imported") % count)
             except Exception, e:
-                request.user.message_set.create(message="ZIP file invalid: %s" % str(e))
+                messages.error(request, _("ZIP file invalid: %s") % str(e))
                 return
-
-            pass
 
         if request.method == 'POST' and 'data' in request.FILES:
             import_zipfile(request, request.POST.get('category'), request.FILES['data'])
         else:
-            request.user.message_set.create(message="No input file given")
+            messages.error(request, _("No input file given"))
 
         return HttpResponseRedirect(reverse('admin:medialibrary_mediafile_changelist'))
 
@@ -415,6 +458,7 @@ class MediaFileAdmin(admin.ModelAdmin):
 
         # FIXME: This is an ugly hack but it avoids 1-3 queries per *FILE*
         # retrieving the translation information
+        # TODO: This should be adapted to multi-db.
         if django_settings.DATABASE_ENGINE == 'postgresql_psycopg2':
             qs = qs.extra(
                 select = {

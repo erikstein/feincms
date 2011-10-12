@@ -1,16 +1,22 @@
-from random import random
 import os
+from cStringIO import StringIO
+# Try to import PIL in either of the two ways it can end up installed.
 try:
     from PIL import Image
 except ImportError:
-    # Django seems to silently swallow the ImportError under certain
-    # circumstances. Raise a generic exception explaining why we are
-    # unable to proceed.
-    raise Exception, 'FeinCMS requires PIL to be installed'
+    try:
+        import Image
+    except ImportError:
+        # Django seems to silently swallow the ImportError under certain
+        # circumstances. Raise a generic exception explaining why we are
+        # unable to proceed.
+        raise Exception, 'FeinCMS requires PIL to be installed'
 
 from django import template
 from django.conf import settings
 from django.utils.encoding import force_unicode
+from django.core.files.storage import default_storage
+from django.core.files.base import ContentFile
 
 
 register = template.Library()
@@ -25,9 +31,41 @@ def tryint(v):
 
 @register.filter
 def thumbnail(filename, size='200x200'):
+    """
+    Creates a thumbnail from the image passed, returning its path::
+
+        {{ object.image|thumbnail:"400x300" }}
+    OR
+        {{ object.image.name|thumbnail:"400x300" }}
+
+    You can pass either an ``ImageField``, ``FileField`` or the ``name``
+    but not the ``url`` attribute of an ``ImageField`` or ``FileField``.
+
+    The dimensions passed are treated as a bounding box. The aspect ratio of
+    the initial image is preserved. Images aren't blown up in size if they
+    are already smaller.
+
+    Both width and height must be specified. If you do not care about one
+    of them, just set it to an arbitrarily large number::
+
+        {{ object.image|thumbnail:"300x999999" }}
+    """
+
     if not (filename and 'x' in size):
         # Better return empty than crash
         return u''
+
+    # figure out storage
+    if hasattr(filename, 'storage'):
+        storage = filename.storage
+    else:
+        storage = default_storage
+
+    # figure out name
+    if hasattr(filename, 'name'):
+        filename = filename.name
+    else:
+        filename = force_unicode(filename)
 
     # defining the size
     x, y = [tryint(x) for x in size.split('x')]
@@ -37,25 +75,56 @@ def thumbnail(filename, size='200x200'):
     except ValueError:
         basename, format = filename, 'jpg'
     miniature = basename + '_thumb_' + size + '.' +  format
-    miniature_filename = os.path.join(settings.MEDIA_ROOT, miniature).encode('utf-8')
-    miniature_url = os.path.join(settings.MEDIA_URL, miniature).encode('utf-8')
-    orig_filename = os.path.join(settings.MEDIA_ROOT, filename).encode('utf-8')
-    # if the image wasn't already resized, resize it
-    if not os.path.exists(miniature_filename) or (os.path.getmtime(miniature_filename)<os.path.getmtime(orig_filename)):
-        try:
-            image = Image.open(orig_filename)
-            image.thumbnail([x, y], Image.ANTIALIAS)
-            image.save(miniature_filename, image.format, quality=100)
-        except IOError:
-            return os.path.join(settings.MEDIA_URL, filename)
-    return force_unicode(miniature_url)
 
+    if not storage.exists(miniature):
+        generate = True
+    else:
+        try:
+            generate = storage.modified_time(miniature)<storage.modified_time(filename)
+        except (NotImplementedError, AttributeError):
+            # storage does NOT support modified_time
+            generate = False
+
+    if generate:
+        try:
+            image = Image.open(StringIO(storage.open(filename).read()))
+        except IOError:
+             # Do not crash if file does not exist for some reason
+            return storage.url(filename)
+
+        image.thumbnail([x, y], Image.ANTIALIAS)
+        buf = StringIO()
+        if image.mode not in ('RGB', 'L'):
+            image = image.convert('RGB')
+        image.save(buf, image.format or 'jpeg', quality=100)
+        raw_data = buf.getvalue()
+        buf.close()
+        storage.save(miniature, ContentFile(raw_data))
+
+    return storage.url(miniature)
 
 @register.filter
 def cropscale(filename, size='200x200'):
+    """
+    Scales the image down and crops it so that its size equals exactly the size
+    passed (as long as the initial image is bigger than the specification).
+    """
+
     if not (filename and 'x' in size):
         # Better return empty than crash
         return u''
+
+    # figure out storage
+    if hasattr(filename, 'storage'):
+        storage = filename.storage
+    else:
+        storage = default_storage
+
+    # figure out name
+    if hasattr(filename, 'name'):
+        filename = filename.name
+    else:
+        filename = force_unicode(filename)
 
     w, h = [tryint(x) for x in size.split('x')]
 
@@ -64,15 +133,22 @@ def cropscale(filename, size='200x200'):
     except ValueError:
         basename, format = filename, 'jpg'
     miniature = basename + '_cropscale_' + size + '.' +  format
-    miniature_filename = os.path.join(settings.MEDIA_ROOT, miniature).encode('utf-8')
-    miniature_url = os.path.join(settings.MEDIA_URL, miniature).encode('utf-8')
-    orig_filename = os.path.join(settings.MEDIA_ROOT, filename).encode('utf-8')
-    # if the image wasn't already resized, resize it
-    if not os.path.exists(miniature_filename) or (os.path.getmtime(miniature_filename)<os.path.getmtime(orig_filename)):
+
+    if not storage.exists(miniature):
+        generate = True
+    else:
         try:
-            image = Image.open(orig_filename)
+            generate = storage.modified_time(miniature)<storage.modified_time(filename)
+        except (NotImplementedError, AttributeError):
+            # storage does NOT support modified_time
+            generate = False
+
+    if generate:
+        try:
+            image = Image.open(StringIO(storage.open(filename).read()))
         except IOError:
-            return os.path.join(settings.MEDIA_URL, filename)
+             # Do not crash if file does not exist for some reason
+            return storage.url(filename)
 
         src_width, src_height = image.size
         src_ratio = float(src_width) / float(src_height)
@@ -90,10 +166,15 @@ def cropscale(filename, size='200x200'):
             x_offset = 0
             y_offset = float(src_height - crop_height) / 2
 
-        try:
-            image = image.crop((x_offset, y_offset, x_offset+int(crop_width), y_offset+int(crop_height)))
-            image = image.resize((dst_width, dst_height), Image.ANTIALIAS)
-            image.save(miniature_filename, image.format, quality=100)
-        except IOError:
-            return os.path.join(settings.MEDIA_URL, filename)
-    return force_unicode(miniature_url)
+        image = image.crop((x_offset, y_offset, x_offset+int(crop_width), y_offset+int(crop_height)))
+        image = image.resize((dst_width, dst_height), Image.ANTIALIAS)
+
+        buf = StringIO()
+        if image.mode not in ('RGB', 'L'):
+            image = image.convert('RGB')
+        image.save(buf, image.format or 'jpeg', quality=100)
+        raw_data = buf.getvalue()
+        buf.close()
+        storage.save(miniature, ContentFile(raw_data))
+
+    return storage.url(miniature)

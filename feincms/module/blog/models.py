@@ -1,3 +1,10 @@
+"""
+This is more a proof-of-concept for your own :class:`feincms.module.Base`
+subclasses than a polished or even sufficient blog module implementation.
+
+It does work, though.
+"""
+
 from datetime import datetime
 
 from django.contrib import admin
@@ -14,7 +21,8 @@ from feincms.utils import get_object
 class EntryManager(models.Manager):
     def published(self):
         return self.filter(
-            published__isnull=False,
+            published=True,
+            published_on__isnull=False,
             published_on__lte=datetime.now(),
             )
 

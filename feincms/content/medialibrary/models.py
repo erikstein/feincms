@@ -1,3 +1,10 @@
+"""
+Media library-based file inclusion tool. Can handle any type of media file,
+not only images.
+"""
+
+import warnings
+
 from django import forms
 from django.conf import settings
 from django.contrib.admin.widgets import AdminRadioSelect
@@ -51,6 +58,26 @@ class MediaFileWidget(forms.TextInput):
 
 # FeinCMS connector
 class MediaFileContent(models.Model):
+    """
+    Create a media file content as follows::
+
+        Page.create_content_type(MediaFileContent, POSITION_CHOICES=(
+            ('default', _('Default')),
+            ('lightbox', _('Lightbox')),
+            ('whatever', _('Whatever')),
+            ))
+
+    For a media file of type 'image' and position 'lightbox', the following
+    templates are tried in order:
+
+    * content/mediafile/image_lightbox.html
+    * content/mediafile/image.html
+    * content/mediafile/lightbox.html
+    * content/mediafile/default.html
+
+    The context contains ``content`` and ``request`` (if available).
+    """
+
     feincms_item_editor_includes = {
         'head': ['admin/content/mediafile/init.html'],
         }
@@ -62,6 +89,9 @@ class MediaFileContent(models.Model):
 
     @classmethod
     def initialize_type(cls, POSITION_CHOICES=None, MEDIAFILE_CLASS=MediaFile):
+        warnings.warn('feincms.content.medialibrary.models.MediaFileContent is deprecated.'
+                ' Use feincms.content.medialibrary.v2.MediaFileContent instead.',
+            DeprecationWarning)
         if 'feincms.module.medialibrary' not in settings.INSTALLED_APPS:
             raise ImproperlyConfigured, 'You have to add \'feincms.module.medialibrary\' to your INSTALLED_APPS before creating a %s' % cls.__name__
 

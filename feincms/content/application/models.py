@@ -1,3 +1,8 @@
+"""
+Third-party application inclusion support.
+"""
+
+from time import mktime
 import re
 
 from django.core import urlresolvers
@@ -14,6 +19,12 @@ except ImportError:
 
 from feincms.admin.editor import ItemEditorForm
 from feincms.contrib.fields import JSONField
+from feincms.utils import get_object
+
+try:
+    from email.utils import parsedate
+except ImportError: # py 2.4 compat
+    from email.Utils import parsedate
 
 try:
     from threading import local
@@ -23,7 +34,7 @@ except ImportError:
 _local = local()
 
 
-def retrieve_page_information(page):
+def retrieve_page_information(page, request=None):
     _local.proximity_info = (page.tree_id, page.lft, page.rght, page.level)
 
 
@@ -31,7 +42,7 @@ def _empty_reverse_cache():
     _local.reverse_cache = {}
 
 
-APPLICATIONCONTENT_RE = re.compile(r'^([\.\w]+)/([\.\w]+)$')
+APPLICATIONCONTENT_RE = re.compile(r'^([^/]+)/([^/]+)$')
 
 
 def reverse(viewname, urlconf=None, args=None, kwargs=None, prefix=None, *vargs, **vkwargs):
@@ -55,6 +66,9 @@ def reverse(viewname, urlconf=None, args=None, kwargs=None, prefix=None, *vargs,
         # try to reverse an URL inside another applicationcontent
         other_urlconf, other_viewname = viewname.split('/')
 
+        # TODO do not use internal feincms data structures as much
+        model_class = ApplicationContent._feincms_content_models[0]
+
         if hasattr(_local, 'urlconf') and other_urlconf == _local.urlconf[0]:
             # We are reversing an URL from our own ApplicationContent
             return _reverse(other_viewname, other_urlconf, args, kwargs, _local.urlconf[1], *vargs, **vkwargs)
@@ -62,41 +76,74 @@ def reverse(viewname, urlconf=None, args=None, kwargs=None, prefix=None, *vargs,
         if not hasattr(_local, 'reverse_cache'):
             _local.reverse_cache = {}
 
-        # Update this when more items are used for the proximity analysis below
+
+        # try different cache keys of descending specificity, this one always works
+        urlconf_cache_keys = {
+            'none': '%s_noprox' % other_urlconf,
+        }
+
+        # when we have more proximity info, we can use more specific cache keys
         proximity_info = getattr(_local, 'proximity_info', None)
         if proximity_info:
-            urlconf_cache_key = '%s_%s' % (other_urlconf, proximity_info[0])
-        else:
-            urlconf_cache_key = '%s_noprox' % other_urlconf
+            urlconf_cache_keys.update({
+                'all': '%s_%s_%s_%s_%s' % ((other_urlconf,) + proximity_info),
+                'tree': '%s_%s' % (other_urlconf, proximity_info[0]),
+            })
 
-        if urlconf_cache_key not in _local.reverse_cache:
-            # TODO do not use internal feincms data structures as much
-            model_class = ApplicationContent._feincms_content_models[0]
+        for key in ('all', 'tree', 'none'):
+            if key in urlconf_cache_keys and urlconf_cache_keys[key] in _local.reverse_cache:
+                content = _local.reverse_cache[urlconf_cache_keys[key]]
+                break
+        else:
             contents = model_class.objects.filter(
                 urlconf_path=other_urlconf).select_related('parent')
 
             if proximity_info:
-                # Poor man's proximity analysis. Filter by tree_id :-)
-                try:
-                    content = contents.get(parent__tree_id=proximity_info[0])
-                except (model_class.DoesNotExist, model_class.MultipleObjectsReturned):
+                # find the closest match within the same subtree
+                tree_contents = contents.filter(parent__tree_id=proximity_info[0])
+                if not len(tree_contents):
+                    # no application contents within the same tree
+                    cache_key = 'tree'
                     try:
                         content = contents[0]
                     except IndexError:
                         content = None
+                elif len(tree_contents) == 1:
+                    cache_key = 'tree'
+                    # just one match within the tree, use it
+                    content = tree_contents[0]
+                else: # len(tree_contents) > 1
+                    cache_key = 'all'
+                    try:
+                        # select all ancestors and descendants and get the one with
+                        # the smallest difference in levels
+                        content = (tree_contents.filter(
+                            parent__rght__gt=proximity_info[2],
+                            parent__lft__lt=proximity_info[1]
+                        ) | tree_contents.filter(
+                            parent__lft__lte=proximity_info[2],
+                            parent__lft__gte=proximity_info[1],
+                        )).extra({'level_diff':"abs(level-%d)" % proximity_info[3]}
+                            ).order_by('level_diff')[0]
+                    except IndexError:
+                        content = tree_contents[0]
             else:
+                cache_key = 'none'
                 try:
                     content = contents[0]
                 except IndexError:
                     content = None
-            _local.reverse_cache[urlconf_cache_key] = content
-        else:
-            content = _local.reverse_cache[urlconf_cache_key]
+            _local.reverse_cache[urlconf_cache_keys[cache_key]] = content
 
         if content:
             # Save information from _urlconfs in case we are inside another
             # application contents' ``process`` method currently
             saved_cfg = getattr(_local, 'urlconf', None)
+
+            if other_urlconf in model_class.ALL_APPS_CONFIG:
+                # We have an overridden URLconf
+                other_urlconf = model_class.ALL_APPS_CONFIG[other_urlconf]['config'].get(
+                    'urls', other_urlconf)
 
             # Initialize application content reverse hackery for the other application
             _local.urlconf = (other_urlconf, content.parent.get_absolute_url())
@@ -104,8 +151,6 @@ def reverse(viewname, urlconf=None, args=None, kwargs=None, prefix=None, *vargs,
             try:
                 url = reverse(other_viewname, other_urlconf, args, kwargs, prefix, *vargs, **vkwargs)
             except:
-                # We really must not fail here. We absolutely need to remove/restore
-                # the _urlconfs information
                 url = None
 
             if saved_cfg:
@@ -187,14 +232,18 @@ class ApplicationContent(models.Model):
                 instance = kwargs.get("instance", None)
 
                 if instance:
-                    self.app_config = cls.ALL_APPS_CONFIG[instance.urlconf_path]['config']
+                    try:
+                        self.app_config = cls.ALL_APPS_CONFIG[instance.urlconf_path]['config']
+                    except KeyError:
+                        self.app_config = {}
+
                     self.custom_fields = {}
                     admin_fields    = self.app_config.get('admin_fields', {})
 
                     if isinstance(admin_fields, dict):
                         self.custom_fields.update(admin_fields)
                     else:
-                        get_fields = urlresolvers.get_callable(admin_fields)
+                        get_fields = get_object(admin_fields)
                         self.custom_fields.update(get_fields(self, *args, **kwargs))
 
                     for k, v in self.custom_fields.items():
@@ -226,14 +275,14 @@ class ApplicationContent(models.Model):
         #: This provides hooks for us to customize the admin interface for embedded instances:
         cls.feincms_item_editor_form = ApplicationContentItemEditorForm
 
+        # Make sure the patched reverse() method has all information it needs
+        cls.parent.field.rel.to.register_request_processors(retrieve_page_information)
+
     def __init__(self, *args, **kwargs):
         super(ApplicationContent, self).__init__(*args, **kwargs)
         self.app_config = self.ALL_APPS_CONFIG.get(self.urlconf_path, {}).get('config', {})
 
-    def render(self, request, **kwargs):
-        return getattr(request, "_feincms_applicationcontents", {}).get(self.id, u'')
-
-    def process(self, request):
+    def process(self, request, **kwargs):
         page_url = self.parent.get_absolute_url()
 
         # Get the rest of the URL
@@ -241,20 +290,23 @@ class ApplicationContent(models.Model):
         # Provide a way for appcontent items to customize URL processing by
         # altering the perceived path of the page:
         if "path_mapper" in self.app_config:
-            path_mapper = urlresolvers.get_callable(self.app_config["path_mapper"])
+            path_mapper = get_object(self.app_config["path_mapper"])
             path, page_url = path_mapper(
                 request.path,
                 page_url,
                 appcontent_parameters=self.parameters
             )
         else:
-            path = re.sub('^' + re.escape(page_url[:-1]), '', request.path)
+            path = request._feincms_extra_context['extra_path']
+
+        # Resolve the module holding the application urls.
+        urlconf_path = self.app_config.get('urls', self.urlconf_path)
 
         # Change the prefix and urlconf for the monkey-patched reverse function ...
-        _local.urlconf = (self.urlconf_path, page_url)
+        _local.urlconf = (urlconf_path, page_url)
 
         try:
-            fn, args, kwargs = resolve(path, self.urlconf_path)
+            fn, args, kwargs = resolve(path, urlconf_path)
         except (ValueError, Resolver404):
             del _local.urlconf
             raise Resolver404
@@ -262,35 +314,56 @@ class ApplicationContent(models.Model):
         #: Variables from the ApplicationContent parameters are added to request
         #  so we can expose them to our templates via the appcontent_parameters
         #  context_processor
-        request._feincms_appcontent_parameters.update(self.parameters)
+        request._feincms_extra_context.update(self.parameters)
 
         view_wrapper = self.app_config.get("view_wrapper", None)
         if view_wrapper:
             fn = partial(
-                urlresolvers.get_callable(view_wrapper),
+                get_object(view_wrapper),
                 view=fn,
                 appcontent_parameters=self.parameters
             )
 
         try:
             output = fn(request, *args, **kwargs)
-        except:
+
+            if isinstance(output, HttpResponse):
+                if self.send_directly(request, output):
+                    return output
+                elif output.status_code == 200:
+
+                    # If the response supports deferred rendering, render the
+                    # response right now. We do not handle template response
+                    # middleware.
+                    if hasattr(output, 'render') and callable(output.render):
+                        output.render()
+
+                    self.rendered_result = mark_safe(output.content.decode('utf-8'))
+                    self.rendered_headers = {}
+                    # Copy relevant headers for later perusal
+                    for h in ('Cache-Control', 'Last-Modified', 'Expires'):
+                        if h in output:
+                            self.rendered_headers.setdefault(h, []).append(output[h])
+            else:
+                self.rendered_result = mark_safe(output)
+
+        finally:
             # We want exceptions to propagate, but we cannot allow the
             # modifications to reverse() to stay here.
             del _local.urlconf
-            raise
 
-        # ... and restore it after processing the view
-        del _local.urlconf
+        return True # successful
 
-        if isinstance(output, HttpResponse):
-            if output.status_code == 200:
-                if not getattr(output, 'standalone', False):
-                    request._feincms_applicationcontents[self.id] = mark_safe(output.content.decode('utf-8'))
+    def send_directly(self, request, response):
+        return response.status_code != 200 or request.is_ajax() or getattr(response, 'standalone', False)
 
-            return output
-        else:
-            request._feincms_applicationcontents[self.id] = mark_safe(output)
+    def render(self, **kwargs):
+        return getattr(self, 'rendered_result', u'')
+
+    def finalize(self, request, response):
+        headers = getattr(self, 'rendered_headers', None)
+        if headers:
+            self._update_response_headers(request, response, headers)
 
     def save(self, *args, **kwargs):
         super(ApplicationContent, self).save(*args, **kwargs)
@@ -301,3 +374,32 @@ class ApplicationContent(models.Model):
         super(ApplicationContent, self).delete(*args, **kwargs)
         # Clear reverse() cache
         _empty_reverse_cache()
+
+    def _update_response_headers(self, request, response, headers):
+        """
+        Combine all headers that were set by the different content types
+        We are interested in Cache-Control, Last-Modified, Expires
+        """
+        from django.utils.http import http_date
+
+        # Ideally, for the Cache-Control header, we'd want to do some intelligent
+        # combining, but that's hard. Let's just collect and unique them and let
+        # the client worry about that.
+        cc_headers = set(('must-revalidate',))
+        for x in (cc.split(",") for cc in headers.get('Cache-Control', ())):
+            cc_headers |= set((s.strip() for s in x))
+
+        if len(cc_headers):
+            response['Cache-Control'] = ", ".join(cc_headers)
+        else:   # Default value
+            response['Cache-Control'] = 'no-cache, must-revalidate'
+
+        # Check all Last-Modified headers, choose the latest one
+        lm_list = [parsedate(x) for x in headers.get('Last-Modified', ())]
+        if len(lm_list) > 0:
+            response['Last-Modified'] = http_date(mktime(max(lm_list)))
+
+        # Check all Expires headers, choose the earliest one
+        lm_list = [parsedate(x) for x in headers.get('Expires', ())]
+        if len(lm_list) > 0:
+            response['Expires'] = http_date(mktime(min(lm_list)))

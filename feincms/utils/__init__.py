@@ -4,8 +4,6 @@
 
 
 """
-Usage instructions
-
 Prefilled attributes
 ====================
 
@@ -14,7 +12,7 @@ massive amounts of database queries when displaying a list of CMS items with
 content objects. This is especially useful if f.e. your blog content is derived
 from FeinCMS and you want to show a list of recent blog entries.
 
-Example:
+Example::
 
     from django.utils.translation import ugettext_lazy as _
 
@@ -41,25 +39,40 @@ Example:
         )
 
 
-    Then, inside your view function or inside a template tag, call
-    prefill_entry_list with the attribute names:
+Then, inside your view function or inside a template tag, call
+prefill_entry_list with the attribute names::
 
     prefill_entry_list(queryset, 'authors', 'richtextcontent_set', 'imagecontent_set')
 
-    or
+or::
 
     {% load feincms_tags %}
     {% feincms_prefill_entry_list object_list "authors,richtextcontent_set,imagecontent_set" %}
 """
 
-from django.core.urlresolvers import get_callable
 from django.db import connection
 from django.db.models import AutoField
 from django.db.models.fields import related
+from django.utils.importlib import import_module
 
 # ------------------------------------------------------------------------
 def get_object(path, fail_silently=False):
-    return get_callable(path, fail_silently)
+    # Return early if path isn't a string (might already be an callable or
+    # a class or whatever)
+    if not isinstance(path, (str, unicode)):
+        return path
+
+    try:
+        dot = path.rindex('.')
+        mod, fn = path[:dot], path[dot+1:]
+    except ValueError:
+        mod, fn = callback, ''
+
+    try:
+        return getattr(import_module(mod), fn)
+    except (AttributeError, ImportError):
+        if not fail_silently:
+            raise
 
 # ------------------------------------------------------------------------
 def prefilled_attribute(name):

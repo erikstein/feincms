@@ -4,6 +4,13 @@ from django.utils.translation import ugettext_lazy as _
 
 
 class RawContent(models.Model):
+    """
+    Content type which can be used to input raw HTML code into the CMS.
+
+    The content isn't escaped and can be used to insert CSS or JS
+    snippets too.
+    """
+
     text = models.TextField(_('content'), blank=True)
 
     class Meta:

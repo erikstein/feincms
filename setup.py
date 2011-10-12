@@ -14,13 +14,13 @@ try:
 except pkg_resources.DistributionNotFound:
     try:
         import django
-        if django.VERSION[0] >= 1 and django.VERSION[1] >= 1 and django.VERSION[2] >= 1:
+        if django.VERSION[0] >= 1 and django.VERSION[1] >= 2 and django.VERSION[2] >= 0:
             add_django_dependency = False
     except ImportError:
         pass
 
 Distribution({
-    "setup_requires": add_django_dependency and  ['Django >=1.1.1'] or []
+    "setup_requires": add_django_dependency and  ['Django >=1.2.0'] or []
 })
 
 import feincms
@@ -28,10 +28,10 @@ import feincms
 setup(name='FeinCMS',
     version=feincms.__version__,
     description='Django-based Page CMS and CMS building toolkit.',
-    long_description=open(os.path.join(os.path.dirname(__file__), 'README')).read(),
+    long_description=open(os.path.join(os.path.dirname(__file__), 'README.rst')).read(),
     author='Matthias Kestenholz',
     author_email='mk@feinheit.ch',
-    url='http://github.com/matthiask/feincms/',
+    url='http://github.com/feincms/feincms/',
     license='BSD License',
     platforms=['OS Independent'],
     classifiers=[
@@ -47,17 +47,19 @@ setup(name='FeinCMS',
         'Topic :: Software Development :: Libraries :: Application Frameworks',
     ],
     install_requires=[
-        #'Django >=1.1.1' # See http://github.com/matthiask/feincms/issues/closed#issue/50
+        #'Django >=1.2.0' # See http://github.com/feincms/feincms/issues/closed#issue/50
     ],
     requires=[
         #'lxml', # only needed for rich text cleansing
-        'tagging (>0.2.1)', # please use SVN trunk
-        'django_mptt (>0.2.1)', # please use the version from http://github.com/matthiask/django-mptt/
+        #'tagging (>0.2.1)', # please use SVN trunk
+        'django_mptt (>0.4.0)',
     ],
-    packages=['feincms',
+    packages=[
+        'feincms',
         'feincms.admin',
         'feincms.content',
         'feincms.content.application',
+        'feincms.content.comments',
         'feincms.content.contactform',
         'feincms.content.file',
         'feincms.content.image',
@@ -67,8 +69,10 @@ setup(name='FeinCMS',
         'feincms.content.rss',
         'feincms.content.section',
         'feincms.content.table',
+        'feincms.content.template',
         'feincms.content.video',
         'feincms.contrib',
+        'feincms.contrib.preview',
         'feincms.management',
         'feincms.management.commands',
         'feincms.module',
@@ -83,9 +87,9 @@ setup(name='FeinCMS',
         'feincms.utils',
         'feincms.utils.html',
         'feincms.views',
+        'feincms.views.cbv',
         'feincms.views.generic',
     ],
     include_package_data=True,
     zip_safe=False,
 )
-
