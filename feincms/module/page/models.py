@@ -24,6 +24,7 @@ from django.db.models import Q, signals
 from django.forms.models import model_to_dict
 from django.forms.util import ErrorList
 from django.http import Http404, HttpResponseRedirect
+from django.utils import translation
 from django.utils.safestring import mark_safe
 from django.utils.translation import ugettext_lazy as _, ugettext
 from django.db.transaction import commit_on_success
@@ -143,7 +144,7 @@ class PageManager(models.Manager, ActiveAwareContentManagerMixin):
         Page.best_match_for_path('/photos/album/2008/09') might return the
         page with url '/photos/album/'.
         """
-
+        
         paths = ['/']
         path = path.strip('/')
 
@@ -160,9 +161,9 @@ class PageManager(models.Manager, ActiveAwareContentManagerMixin):
         if path:
             tokens = path.split('/')
             paths += ['/%s/' % '/'.join(tokens[:i]) for i in range(1, len(tokens)+1)]
-
+        
         try:
-            page = self.active().filter(_cached_url__in=paths).extra(
+            page = self.active().filter(_cached_url__in=paths, language=translation.get_language()).extra(
                 select={'_url_length': 'LENGTH(_cached_url)'}).order_by('-_url_length')[0]
             if settings.FEINCMS_USE_CACHE:
                 django_cache.set(ck, page)
@@ -729,12 +730,12 @@ class PageAdminForm(forms.ModelForm):
             # to inspect the active filters to determine whether two pages
             # really won't be active at the same time.
             return cleaned_data
-
+        
         if cleaned_data['override_url']:
-            if active_pages.filter(_cached_url=cleaned_data['override_url']).count():
+            if active_pages.filter(_cached_url=cleaned_data['override_url'], language=cleaned_data['language']).count():
                 self._errors['override_url'] = ErrorList([_('This URL is already taken by an active page.')])
                 del cleaned_data['override_url']
-
+        
             return cleaned_data
 
         if current_id:
